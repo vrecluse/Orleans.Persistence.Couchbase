@@ -1,22 +1,26 @@
 using Couchbase;
-using Couchbase.Core.IO.Transcoders;
 using Couchbase.KeyValue;
+using CommunityToolkit.HighPerformance.Buffers;
 using Microsoft.Extensions.Logging;
 using Orleans.Persistence.Couchbase.Configuration;
 using Orleans.Persistence.Couchbase.Infrastructure;
+using Orleans.Persistence.Couchbase.Serialization;
 using Orleans.Storage;
 
 namespace Orleans.Persistence.Couchbase.Core;
 
 /// <summary>
-/// High-performance Couchbase data manager using custom transcoder for zero-copy serialization.
+/// High-performance Couchbase data manager with smart format selection.
+/// Supports both MessagePack (high performance) and JSON (operational visibility).
 /// </summary>
 public sealed class CouchbaseDataManager : ICouchbaseDataManager
 {
     private readonly ICluster _cluster;
     private readonly CouchbaseStorageOptions _options;
     private readonly ILogger<CouchbaseDataManager> _logger;
-    private readonly ITypeTranscoder _transcoder;
+    private readonly SmartCouchbaseTranscoder _smartTranscoder;
+    private readonly MessagePackCouchbaseSerializer _messagePackSerializer;
+    private readonly JsonCouchbaseSerializer _jsonSerializer;
     private ICouchbaseCollection? _collection;
 
     public string BucketName => _options.BucketName;
@@ -24,12 +28,16 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
     public CouchbaseDataManager(
         ICluster cluster,
         CouchbaseStorageOptions options,
-        ITypeTranscoder transcoder,
+        MessagePackCouchbaseSerializer messagePackSerializer,
+        JsonCouchbaseSerializer jsonSerializer,
+        SmartCouchbaseTranscoder smartTranscoder,
         ILogger<CouchbaseDataManager> logger)
     {
         _cluster = cluster ?? throw new ArgumentNullException(nameof(cluster));
         _options = options ?? throw new ArgumentNullException(nameof(options));
-        _transcoder = transcoder ?? throw new ArgumentNullException(nameof(transcoder));
+        _messagePackSerializer = messagePackSerializer ?? throw new ArgumentNullException(nameof(messagePackSerializer));
+        _jsonSerializer = jsonSerializer ?? throw new ArgumentNullException(nameof(jsonSerializer));
+        _smartTranscoder = smartTranscoder ?? throw new ArgumentNullException(nameof(smartTranscoder));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -65,10 +73,10 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
 
         try
         {
+            // SmartTranscoder automatically detects JSON vs MessagePack format
             var result = await _collection!.GetAsync(key, options =>
-                options.Transcoder(_transcoder));
+                options.Transcoder(_smartTranscoder));
 
-            // Transcoder handles deserialization internally via ContentAs<T>
             var state = result.ContentAs<T>();
             return (state, result.Cas);
         }
@@ -85,28 +93,56 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
         ulong cas,
         CancellationToken cancellationToken = default)
     {
+        return await WriteAsync(grainType, grainId, state, cas, _options.DefaultDataFormat, cancellationToken);
+    }
+
+    /// <summary>
+    /// Writes grain state with explicit format selection.
+    /// </summary>
+    public async Task<ulong> WriteAsync<T>(
+        string grainType,
+        string grainId,
+        T state,
+        ulong cas,
+        CouchbaseDataFormat format,
+        CancellationToken cancellationToken = default)
+    {
         EnsureInitialized();
 
         var key = BuildDocumentKey(grainType, grainId);
 
+        // Use ArrayPoolBufferWriter for zero-allocation serialization
+        using var writer = new ArrayPoolBufferWriter<byte>(2048);
+
+        // Select serializer based on format
+        var serializer = format == CouchbaseDataFormat.MessagePack
+            ? _messagePackSerializer
+            : (ICouchbaseSerializer)_jsonSerializer;
+
+        serializer.Serialize(writer, state);
+
+        // Convert to array for Couchbase SDK (final allocation point)
+        var dataToSend = writer.WrittenMemory.ToArray();
+
         try
         {
             IMutationResult result;
+            var rawTranscoder = new RawBinaryTranscoder();
 
             if (cas != 0)
             {
                 // Use ReplaceAsync with CAS for optimistic concurrency control
                 var replaceOptions = new ReplaceOptions()
                     .Cas(cas)
-                    .Transcoder(_transcoder);
-                result = await _collection!.ReplaceAsync(key, state, replaceOptions);
+                    .Transcoder(rawTranscoder);
+                result = await _collection!.ReplaceAsync(key, dataToSend, replaceOptions);
             }
             else
             {
                 // Use UpsertAsync for new documents
                 var upsertOptions = new UpsertOptions()
-                    .Transcoder(_transcoder);
-                result = await _collection!.UpsertAsync(key, state, upsertOptions);
+                    .Transcoder(rawTranscoder);
+                result = await _collection!.UpsertAsync(key, dataToSend, upsertOptions);
             }
 
             return result.Cas;

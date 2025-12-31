@@ -1,5 +1,4 @@
 using Couchbase;
-using Couchbase.Core.IO.Transcoders;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -8,6 +7,7 @@ using Microsoft.Extensions.Options;
 using Orleans.Persistence.Couchbase.Configuration;
 using Orleans.Persistence.Couchbase.Core;
 using Orleans.Persistence.Couchbase.Infrastructure;
+using Orleans.Persistence.Couchbase.Serialization;
 using Orleans.Storage;
 
 namespace Orleans.Persistence.Couchbase.Hosting;
@@ -94,18 +94,22 @@ public static class CouchbaseServiceCollectionExtensions
             });
         }
 
-        // Register high-performance transcoder
-        services.TryAddSingleton<ITypeTranscoder, OrleansCouchbaseTranscoder>();
+        // Register serializers (singleton - stateless)
+        services.TryAddSingleton<MessagePackCouchbaseSerializer>();
+        services.TryAddSingleton<JsonCouchbaseSerializer>();
+        services.TryAddSingleton<SmartCouchbaseTranscoder>();
 
         // Register data manager
         services.AddKeyedSingleton<ICouchbaseDataManager>(name, (sp, key) =>
         {
             var cluster = sp.GetRequiredService<ICluster>();
             var options = sp.GetRequiredService<IOptionsMonitor<CouchbaseStorageOptions>>().Get(name);
-            var transcoder = sp.GetRequiredService<ITypeTranscoder>();
+            var msgPackSerializer = sp.GetRequiredService<MessagePackCouchbaseSerializer>();
+            var jsonSerializer = sp.GetRequiredService<JsonCouchbaseSerializer>();
+            var smartTranscoder = sp.GetRequiredService<SmartCouchbaseTranscoder>();
             var logger = sp.GetRequiredService<ILogger<CouchbaseDataManager>>();
 
-            return new CouchbaseDataManager(cluster, options, transcoder, logger);
+            return new CouchbaseDataManager(cluster, options, msgPackSerializer, jsonSerializer, smartTranscoder, logger);
         });
 
         // Register grain storage

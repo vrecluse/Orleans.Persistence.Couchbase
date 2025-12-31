@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using Orleans.Persistence.Couchbase.Serialization;
 
 namespace Orleans.Persistence.Couchbase.Configuration;
 
@@ -38,6 +39,12 @@ public sealed class CouchbaseStorageOptions
     /// Couchbase password for authentication.
     /// </summary>
     public string? Password { get; set; }
+
+    /// <summary>
+    /// Default serialization format for new writes.
+    /// MessagePack for high performance, JSON for operational visibility.
+    /// </summary>
+    public CouchbaseDataFormat DefaultDataFormat { get; set; } = CouchbaseDataFormat.MessagePack;
 
     /// <summary>
     /// Operation timeout. If not set, uses Couchbase SDK defaults.
