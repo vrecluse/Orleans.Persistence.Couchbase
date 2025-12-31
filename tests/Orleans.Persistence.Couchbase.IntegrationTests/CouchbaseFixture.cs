@@ -1,6 +1,3 @@
-using Couchbase;
-using Couchbase.Management.Buckets;
-using DotNet.Testcontainers.Containers;
 using System;
 using System.Threading.Tasks;
 using Testcontainers.Couchbase;
@@ -19,7 +16,7 @@ public sealed class CouchbaseFixture : IAsyncLifetime
     public const string Username = "Administrator";
     public const string Password = "password";
 
-    public ICluster? Cluster { get; private set; }
+    public global::Couchbase.ICluster? Cluster { get; private set; }
 
     public string ConnectionString => _container?.GetConnectionString()
         ?? throw new InvalidOperationException("Container not initialized");
@@ -28,38 +25,77 @@ public sealed class CouchbaseFixture : IAsyncLifetime
     {
         // Create and start Couchbase container
         _container = new CouchbaseBuilder()
-            .WithImage("couchbase:community-7.6.4")
+            .WithImage("couchbase:community")
             .Build();
 
         await _container.StartAsync();
 
-        // Connect to the cluster using default credentials
-        // Testcontainers.Couchbase uses Administrator/password by default
-        var options = new ClusterOptions
-        {
-            UserName = Username,
-            Password = Password
-        };
+        // Wait for Couchbase to fully initialize
+        await Task.Delay(TimeSpan.FromSeconds(15));
 
-        Cluster = await global::Couchbase.Cluster.ConnectAsync(_container.GetConnectionString(), options);
+        var connectionString = _container.GetConnectionString();
 
-        // Create bucket if needed
-        try
+        const int maxRetries = 10;
+        Exception? lastException = null;
+
+        for (var i = 0; i < maxRetries; i++)
         {
-            var bucketManager = Cluster.Buckets;
-            await bucketManager.CreateBucketAsync(new BucketSettings
+            try
             {
-                Name = BucketName,
-                RamQuotaMB = 100
-            });
+                // Create fresh ClusterOptions on each retry to avoid disposed state
+                var options = new global::Couchbase.ClusterOptions
+                {
+                    UserName = Username,
+                    Password = Password
+                };
 
-            var bucket = await Cluster.BucketAsync(BucketName);
-            await bucket.WaitUntilReadyAsync(TimeSpan.FromSeconds(30));
+                Cluster = await global::Couchbase.Cluster.ConnectAsync(connectionString, options);
+
+                // Wait for cluster to be ready
+                await Cluster.WaitUntilReadyAsync(TimeSpan.FromSeconds(60));
+
+                // Create bucket
+                var bucketManager = Cluster.Buckets;
+
+                try
+                {
+                    await bucketManager.CreateBucketAsync(new global::Couchbase.Management.Buckets.BucketSettings
+                    {
+                        Name = BucketName,
+                        RamQuotaMB = 128,
+                        BucketType = global::Couchbase.Management.Buckets.BucketType.Couchbase
+                    });
+                }
+                catch (global::Couchbase.Management.Buckets.BucketExistsException)
+                {
+                    // Bucket already exists, that's fine
+                }
+
+                // Wait for bucket to be ready
+                var bucket = await Cluster.BucketAsync(BucketName);
+                await bucket.WaitUntilReadyAsync(TimeSpan.FromSeconds(60));
+
+                return; // Success
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+
+                // Cleanup on failure - but don't dispose, just set to null
+                // The GC will handle cleanup
+                Cluster = null;
+
+                if (i < maxRetries - 1)
+                {
+                    // Linear backoff: 3s, 6s, 9s, ...
+                    await Task.Delay(TimeSpan.FromSeconds(3 * (i + 1)));
+                }
+            }
         }
-        catch
-        {
-            // Bucket might already exist
-        }
+
+        throw new InvalidOperationException(
+            $"Failed to connect to Couchbase and create bucket after {maxRetries} retries. Connection string: {connectionString}",
+            lastException);
     }
 
     public async ValueTask DisposeAsync()
