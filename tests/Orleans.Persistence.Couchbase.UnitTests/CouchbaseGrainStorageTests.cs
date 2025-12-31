@@ -1,82 +1,234 @@
-﻿namespace Orleans.Persistence.Couchbase.UnitTests
+using FluentAssertions;
+using Microsoft.Extensions.Logging;
+using Moq;
+using Orleans.Persistence.Couchbase.Core;
+using Orleans.Persistence.Couchbase.Serialization;
+using Orleans.Runtime;
+using Orleans.Storage;
+using System;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using Xunit;
+
+namespace Orleans.Persistence.Couchbase.UnitTests;
+
+public class CouchbaseGrainStorageTests
 {
-    using System;
-    using System.Threading.Tasks;
-    using FluentAssertions;
-    using Microsoft.Extensions.Logging;
-    using Moq;
-    using Newtonsoft.Json;
-    using NUnit.Framework;
-    using Orleans.Persistence.Couchbase.Core;
-    using Orleans.Persistence.Couchbase.Models;
-    using Orleans.Persistence.Couchbase.Serialization;
+    private readonly Mock<ICouchbaseDataManager> _mockDataManager;
+    private readonly Mock<ILogger<CouchbaseGrainStorage>> _mockLogger;
+    private readonly Mock<IGrainStateSerializer> _mockSerializer;
+    private readonly CouchbaseGrainStorage _storage;
 
-    [TestFixture]
-    [System.ComponentModel.Category("UnitTests")]
-    public class CouchbaseGrainStorageTests
-	{
-		[Test]
-		public async Task ReadStateAsyncShouldCallDataManagerReadAsync()
-		{
-            var mockDataManager = new Mock<ICouchbaseDataManager>();
-            var mockLogger = new Mock<ILogger<CouchbaseGrainStorage>>();
-            var mockSerialiser = new Mock<ISerializer>();
+    public CouchbaseGrainStorageTests()
+    {
+        _mockDataManager = new Mock<ICouchbaseDataManager>();
+        _mockLogger = new Mock<ILogger<CouchbaseGrainStorage>>();
+        _mockSerializer = new Mock<IGrainStateSerializer>();
 
-            mockDataManager.Setup(s => s.ReadAsync(It.Is<string>(i => i == "String"), It.IsAny<string>()))
-                .ReturnsAsync(() => new ReadResponse { Document = "123", ETag = "456" }).Verifiable();
+        _mockSerializer.Setup(s => s.ContentType).Returns("application/json");
 
-            mockSerialiser.Setup(s => s.Deserialize(It.Is<string>(i => i == "123"), It.IsAny<Type>())).Returns(() => "Deserialised").Verifiable();
+        _storage = new CouchbaseGrainStorage(
+            "TestStorage",
+            _mockDataManager.Object,
+            _mockSerializer.Object,
+            _mockLogger.Object);
+    }
 
-            var sut = new CouchbaseGrainStorage(string.Empty, mockDataManager.Object, mockLogger.Object, mockSerialiser.Object);
+    [Fact]
+    public async Task ReadStateAsync_ShouldDeserializeStateAndSetCas()
+    {
+        // Arrange
+        var grainId = GrainId.Create("test-grain", "key1");
+        var grainState = new GrainState<TestState> { State = new TestState() };
+        var testData = Encoding.UTF8.GetBytes("{\"Value\":\"test\"}");
+        var testCas = 12345UL;
 
-            var grainState = new GrainState<string> { State = "" };
-            await sut.ReadStateAsync(typeof(string).Name, null, grainState);
+        _mockDataManager
+            .Setup(dm => dm.ReadAsync("TestState", grainId.ToString(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((testData.AsMemory(), testCas));
 
-            grainState.State.Should().Be("Deserialised");
-            grainState.ETag.Should().Be("456");
-        }
+        var expectedState = new TestState { Value = "deserialized" };
+        _mockSerializer
+            .Setup(s => s.Deserialize<TestState>(It.IsAny<ReadOnlyMemory<byte>>()))
+            .Returns(expectedState);
 
-        [Test]
-        public async Task WriteStateAsyncShouldCallDataManagerWriteAsync()
+        // Act
+        await _storage.ReadStateAsync("TestState", grainId, grainState);
+
+        // Assert
+        grainState.State.Should().BeSameAs(expectedState);
+        grainState.ETag.Should().Be(testCas.ToString());
+        grainState.RecordExists.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ReadStateAsync_WhenDocumentNotFound_ShouldReturnDefaultState()
+    {
+        // Arrange
+        var grainId = GrainId.Create("test-grain", "key1");
+        var grainState = new GrainState<TestState> { State = new TestState() };
+
+        _mockDataManager
+            .Setup(dm => dm.ReadAsync("TestState", grainId.ToString(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((ReadOnlyMemory<byte>.Empty, 0UL));
+
+        // Act
+        await _storage.ReadStateAsync("TestState", grainId, grainState);
+
+        // Assert
+        grainState.ETag.Should().BeNull();
+        grainState.RecordExists.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task WriteStateAsync_ShouldSerializeAndWriteState()
+    {
+        // Arrange
+        var grainId = GrainId.Create("test-grain", "key1");
+        var testState = new TestState { Value = "test-value" };
+        var grainState = new GrainState<TestState>
         {
-            var mockDataManager = new Mock<ICouchbaseDataManager>();
-            var mockLogger = new Mock<ILogger<CouchbaseGrainStorage>>();
-            var mockSerialiser = new Mock<ISerializer>();
+            State = testState,
+            ETag = "123"
+        };
 
-            var serialised = JsonConvert.SerializeObject("Serialised");
+        var serializedData = Encoding.UTF8.GetBytes("{\"Value\":\"test-value\"}");
+        _mockSerializer
+            .Setup(s => s.Serialize(testState))
+            .Returns(serializedData);
 
-            mockDataManager.Setup(
-                    s => s.WriteAsync(
-                        It.Is<string>(i => i == "String"),
-                        It.IsAny<string>(),
-                        It.Is<string>(i => i == serialised),
-                        It.Is<string>(i => i == "456")))
-                .ReturnsAsync(() => "eTag").Verifiable();
+        var newCas = 456UL;
+        _mockDataManager
+            .Setup(dm => dm.WriteAsync(
+                "TestState",
+                grainId.ToString(),
+                It.IsAny<ReadOnlyMemory<byte>>(),
+                123UL,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(newCas);
 
-            mockSerialiser.Setup(s => s.Serialize(It.Is<string>(i => i == "123"))).Returns(() => serialised).Verifiable();
+        // Act
+        await _storage.WriteStateAsync("TestState", grainId, grainState);
 
-            var sut = new CouchbaseGrainStorage(string.Empty, mockDataManager.Object, mockLogger.Object, mockSerialiser.Object);
+        // Assert
+        grainState.ETag.Should().Be(newCas.ToString());
+        grainState.RecordExists.Should().BeTrue();
 
-            var grainState = new GrainState<string> { State = "123", ETag = "456" };
-            await sut.WriteStateAsync(typeof(string).Name, null, grainState);
+        _mockDataManager.Verify(
+            dm => dm.WriteAsync(
+                "TestState",
+                grainId.ToString(),
+                It.IsAny<ReadOnlyMemory<byte>>(),
+                123UL,
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
 
-            grainState.State.Should().Be("123");
-            grainState.ETag.Should().Be("eTag");
-        }
-
-        [Test]
-        public async Task ClearStateAsyncShouldCallDataManagerDeleteAsync()
+    [Fact]
+    public async Task WriteStateAsync_WithNullETag_ShouldUseZeroCas()
+    {
+        // Arrange
+        var grainId = GrainId.Create("test-grain", "key1");
+        var testState = new TestState { Value = "test-value" };
+        var grainState = new GrainState<TestState>
         {
-            var mockDataManager = new Mock<ICouchbaseDataManager>();
-            var mockLogger = new Mock<ILogger<CouchbaseGrainStorage>>();
-            var mockSerialiser = new Mock<ISerializer>();
+            State = testState,
+            ETag = null
+        };
 
-            var sut = new CouchbaseGrainStorage(string.Empty, mockDataManager.Object, mockLogger.Object, mockSerialiser.Object);
+        var serializedData = Encoding.UTF8.GetBytes("{\"Value\":\"test-value\"}");
+        _mockSerializer
+            .Setup(s => s.Serialize(testState))
+            .Returns(serializedData);
 
-            var grainState = new GrainState<string> { State = "123", ETag = "456" };
-            await sut.ClearStateAsync(typeof(string).Name, null, grainState);
+        var newCas = 789UL;
+        _mockDataManager
+            .Setup(dm => dm.WriteAsync(
+                "TestState",
+                grainId.ToString(),
+                It.IsAny<ReadOnlyMemory<byte>>(),
+                0UL,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(newCas);
 
-            mockDataManager.Verify(v => v.DeleteAsync(It.Is<string>(i => i == "String"), It.IsAny<string>(), It.Is<string>(i => i == "456")), Times.Once);
-        }
-	}
+        // Act
+        await _storage.WriteStateAsync("TestState", grainId, grainState);
+
+        // Assert
+        grainState.ETag.Should().Be(newCas.ToString());
+
+        _mockDataManager.Verify(
+            dm => dm.WriteAsync(
+                "TestState",
+                grainId.ToString(),
+                It.IsAny<ReadOnlyMemory<byte>>(),
+                0UL,
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task ClearStateAsync_ShouldCallDeleteWithCorrectCas()
+    {
+        // Arrange
+        var grainId = GrainId.Create("test-grain", "key1");
+        var grainState = new GrainState<TestState>
+        {
+            State = new TestState(),
+            ETag = "999"
+        };
+
+        _mockDataManager
+            .Setup(dm => dm.DeleteAsync(
+                "TestState",
+                grainId.ToString(),
+                999UL,
+                It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        // Act
+        await _storage.ClearStateAsync("TestState", grainId, grainState);
+
+        // Assert
+        grainState.ETag.Should().BeNull();
+        grainState.RecordExists.Should().BeFalse();
+
+        _mockDataManager.Verify(
+            dm => dm.DeleteAsync(
+                "TestState",
+                grainId.ToString(),
+                999UL,
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task ClearStateAsync_WithInconsistentStateException_ShouldThrow()
+    {
+        // Arrange
+        var grainId = GrainId.Create("test-grain", "key1");
+        var grainState = new GrainState<TestState>
+        {
+            State = new TestState(),
+            ETag = "123"
+        };
+
+        _mockDataManager
+            .Setup(dm => dm.DeleteAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<ulong>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InconsistentStateException("ETag mismatch", "123", "456"));
+
+        // Act & Assert
+        await Assert.ThrowsAsync<InconsistentStateException>(
+            async () => await _storage.ClearStateAsync("TestState", grainId, grainState));
+    }
+
+    private class TestState
+    {
+        public string Value { get; set; } = string.Empty;
+    }
 }
