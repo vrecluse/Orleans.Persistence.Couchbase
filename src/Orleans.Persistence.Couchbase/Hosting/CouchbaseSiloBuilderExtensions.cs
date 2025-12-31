@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Orleans.Hosting;
 using Orleans.Persistence.Couchbase.Configuration;
 
@@ -33,6 +34,19 @@ public static class CouchbaseSiloBuilderExtensions
     {
         builder.ConfigureServices(services =>
             services.AddCouchbaseGrainStorage(name, configuration));
+        return builder;
+    }
+
+    /// <summary>
+    /// 添加 Couchbase Grain Storage（使用 OptionsBuilder 配置）
+    /// </summary>
+    public static ISiloBuilder AddCouchbaseGrainStorage(
+        this ISiloBuilder builder,
+        string name,
+        Action<OptionsBuilder<CouchbaseStorageOptions>> configure)
+    {
+        builder.ConfigureServices(services =>
+            services.AddCouchbaseGrainStorage(name, configure));
         return builder;
     }
 }

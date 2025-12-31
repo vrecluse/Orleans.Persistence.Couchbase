@@ -63,6 +63,29 @@ public static class CouchbaseServiceCollectionExtensions
         return services;
     }
 
+    /// <summary>
+    /// Adds Couchbase grain storage with OptionsBuilder configuration.
+    /// </summary>
+    public static IServiceCollection AddCouchbaseGrainStorage(
+        this IServiceCollection services,
+        string name,
+        Action<OptionsBuilder<CouchbaseStorageOptions>> configure)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(name);
+        ArgumentNullException.ThrowIfNull(configure);
+
+        var optionsBuilder = services.AddOptions<CouchbaseStorageOptions>(name)
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+
+        configure(optionsBuilder);
+
+        RegisterCouchbaseServices(services, name);
+
+        return services;
+    }
+
     private static void RegisterCouchbaseServices(IServiceCollection services, string name)
     {
         // Register ICluster as singleton (if not already registered)
