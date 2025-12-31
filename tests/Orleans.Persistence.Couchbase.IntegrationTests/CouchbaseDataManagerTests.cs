@@ -1,17 +1,15 @@
 using FluentAssertions;
+using MessagePack;
 using Microsoft.Extensions.Logging;
 using Orleans.Persistence.Couchbase.Configuration;
 using Orleans.Persistence.Couchbase.Core;
-using Orleans.Persistence.Couchbase.Serialization;
-using System;
-using System.Text;
-using System.Threading.Tasks;
+using Orleans.Persistence.Couchbase.Infrastructure;
 using Xunit;
 
 namespace Orleans.Persistence.Couchbase.IntegrationTests;
 
 /// <summary>
-/// Integration tests for CouchbaseDataManager using real Couchbase container
+/// Integration tests for CouchbaseDataManager using real Couchbase container.
 /// </summary>
 [Collection(CouchbaseCollection.Name)]
 public class CouchbaseDataManagerTests : IAsyncLifetime
@@ -34,13 +32,13 @@ public class CouchbaseDataManagerTests : IAsyncLifetime
             Password = CouchbaseFixture.Password
         };
 
-        var serializer = new JsonGrainStateSerializer();
+        var transcoder = new OrleansCouchbaseTranscoder();
         var logger = new LoggerFactory().CreateLogger<CouchbaseDataManager>();
 
         _dataManager = new CouchbaseDataManager(
             _fixture.Cluster!,
             options,
-            serializer,
+            transcoder,
             logger);
 
         await _dataManager.InitializeAsync();
@@ -48,8 +46,10 @@ public class CouchbaseDataManagerTests : IAsyncLifetime
 
     public async ValueTask DisposeAsync()
     {
-        // Don't dispose the cluster - it's managed by the fixture
-        await ValueTask.CompletedTask;
+        if (_dataManager != null)
+        {
+            await _dataManager.DisposeAsync();
+        }
     }
 
     [Fact]
@@ -58,20 +58,22 @@ public class CouchbaseDataManagerTests : IAsyncLifetime
         // Arrange
         var grainType = "TestGrain";
         var grainId = Guid.NewGuid().ToString();
-        var testData = Encoding.UTF8.GetBytes("{\"Name\":\"Test\",\"Value\":42}");
+        var testState = new TestState { Name = "Test", Value = 42 };
 
         // Act - Write
-        var cas = await _dataManager!.WriteAsync(grainType, grainId, testData, 0);
+        var cas = await _dataManager!.WriteAsync(grainType, grainId, testState, 0);
 
         // Assert - Write
         cas.Should().BeGreaterThan(0);
 
         // Act - Read
-        var (data, readCas) = await _dataManager.ReadAsync(grainType, grainId);
+        var (state, readCas) = await _dataManager.ReadAsync<TestState>(grainType, grainId);
 
         // Assert - Read
         readCas.Should().Be(cas);
-        data.Length.Should().BeGreaterThan(0);
+        state.Should().NotBeNull();
+        state!.Name.Should().Be("Test");
+        state.Value.Should().Be(42);
     }
 
     [Fact]
@@ -82,10 +84,10 @@ public class CouchbaseDataManagerTests : IAsyncLifetime
         var grainId = Guid.NewGuid().ToString();
 
         // Act
-        var (data, cas) = await _dataManager!.ReadAsync(grainType, grainId);
+        var (state, cas) = await _dataManager!.ReadAsync<TestState>(grainType, grainId);
 
         // Assert
-        data.Length.Should().Be(0);
+        state.Should().BeNull();
         cas.Should().Be(0);
     }
 
@@ -95,21 +97,23 @@ public class CouchbaseDataManagerTests : IAsyncLifetime
         // Arrange
         var grainType = "TestGrain";
         var grainId = Guid.NewGuid().ToString();
-        var initialData = Encoding.UTF8.GetBytes("{\"Version\":1}");
-        var updatedData = Encoding.UTF8.GetBytes("{\"Version\":2}");
+        var initialState = new TestState { Name = "Version1", Value = 1 };
+        var updatedState = new TestState { Name = "Version2", Value = 2 };
 
         // Act - Initial write
-        var initialCas = await _dataManager!.WriteAsync(grainType, grainId, initialData, 0);
+        var initialCas = await _dataManager!.WriteAsync(grainType, grainId, initialState, 0);
 
         // Act - Update with CAS
-        var updatedCas = await _dataManager.WriteAsync(grainType, grainId, updatedData, initialCas);
+        var updatedCas = await _dataManager.WriteAsync(grainType, grainId, updatedState, initialCas);
 
         // Assert
         updatedCas.Should().BeGreaterThan(initialCas);
 
         // Verify the update
-        var (data, _) = await _dataManager.ReadAsync(grainType, grainId);
-        data.Length.Should().BeGreaterThan(0);
+        var (state, _) = await _dataManager.ReadAsync<TestState>(grainType, grainId);
+        state.Should().NotBeNull();
+        state!.Name.Should().Be("Version2");
+        state.Value.Should().Be(2);
     }
 
     [Fact]
@@ -118,15 +122,15 @@ public class CouchbaseDataManagerTests : IAsyncLifetime
         // Arrange
         var grainType = "TestGrain";
         var grainId = Guid.NewGuid().ToString();
-        var initialData = Encoding.UTF8.GetBytes("{\"Version\":1}");
-        var updatedData = Encoding.UTF8.GetBytes("{\"Version\":2}");
+        var initialState = new TestState { Name = "Version1", Value = 1 };
+        var updatedState = new TestState { Name = "Version2", Value = 2 };
 
         // Write initial data
-        await _dataManager!.WriteAsync(grainType, grainId, initialData, 0);
+        await _dataManager!.WriteAsync(grainType, grainId, initialState, 0);
 
         // Act & Assert - Try to update with wrong CAS
         var wrongCas = 12345UL;
-        var act = async () => await _dataManager.WriteAsync(grainType, grainId, updatedData, wrongCas);
+        var act = async () => await _dataManager.WriteAsync(grainType, grainId, updatedState, wrongCas);
 
         await act.Should().ThrowAsync<Orleans.Storage.InconsistentStateException>();
     }
@@ -137,17 +141,17 @@ public class CouchbaseDataManagerTests : IAsyncLifetime
         // Arrange
         var grainType = "TestGrain";
         var grainId = Guid.NewGuid().ToString();
-        var testData = Encoding.UTF8.GetBytes("{\"ToDelete\":true}");
+        var testState = new TestState { Name = "ToDelete", Value = 99 };
 
         // Write first
-        var cas = await _dataManager!.WriteAsync(grainType, grainId, testData, 0);
+        var cas = await _dataManager!.WriteAsync(grainType, grainId, testState, 0);
 
         // Act - Delete
         await _dataManager.DeleteAsync(grainType, grainId, cas);
 
         // Assert - Should not exist
-        var (data, readCas) = await _dataManager.ReadAsync(grainType, grainId);
-        data.Length.Should().Be(0);
+        var (state, readCas) = await _dataManager.ReadAsync<TestState>(grainType, grainId);
+        state.Should().BeNull();
         readCas.Should().Be(0);
     }
 
@@ -162,5 +166,15 @@ public class CouchbaseDataManagerTests : IAsyncLifetime
         var act = async () => await _dataManager!.DeleteAsync(grainType, grainId, 0);
 
         await act.Should().NotThrowAsync();
+    }
+
+    [MessagePackObject]
+    private class TestState
+    {
+        [Key(0)]
+        public string Name { get; set; } = string.Empty;
+
+        [Key(1)]
+        public int Value { get; set; }
     }
 }

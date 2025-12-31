@@ -1,29 +1,26 @@
 using Microsoft.Extensions.Logging;
-using Orleans.Persistence.Couchbase.Serialization;
 using Orleans.Runtime;
 using Orleans.Storage;
 
 namespace Orleans.Persistence.Couchbase.Core;
 
 /// <summary>
-/// Couchbase Grain Storage 实现
+/// High-performance Couchbase grain storage implementation.
+/// Serialization is handled by the data manager's transcoder.
 /// </summary>
 public sealed class CouchbaseGrainStorage : IGrainStorage
 {
     private readonly string _name;
     private readonly ICouchbaseDataManager _dataManager;
-    private readonly IGrainStateSerializer _serializer;
     private readonly ILogger<CouchbaseGrainStorage> _logger;
 
     public CouchbaseGrainStorage(
         string name,
         ICouchbaseDataManager dataManager,
-        IGrainStateSerializer serializer,
         ILogger<CouchbaseGrainStorage> logger)
     {
         _name = name ?? throw new ArgumentNullException(nameof(name));
         _dataManager = dataManager ?? throw new ArgumentNullException(nameof(dataManager));
-        _serializer = serializer ?? throw new ArgumentNullException(nameof(serializer));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -34,11 +31,11 @@ public sealed class CouchbaseGrainStorage : IGrainStorage
             var grainType = stateName;
             var grainIdString = grainId.ToString();
 
-            var (data, cas) = await _dataManager.ReadAsync(grainType, grainIdString);
+            var (state, cas) = await _dataManager.ReadAsync<T>(grainType, grainIdString);
 
-            if (data.Length > 0)
+            if (cas != 0)
             {
-                grainState.State = _serializer.Deserialize<T>(data);
+                grainState.State = state ?? Activator.CreateInstance<T>();
                 grainState.ETag = cas.ToString();
                 grainState.RecordExists = true;
             }
@@ -63,10 +60,9 @@ public sealed class CouchbaseGrainStorage : IGrainStorage
             var grainType = stateName;
             var grainIdString = grainId.ToString();
 
-            var data = _serializer.Serialize(grainState.State);
             var cas = ulong.TryParse(grainState.ETag, out var parsedCas) ? parsedCas : 0;
 
-            var newCas = await _dataManager.WriteAsync(grainType, grainIdString, data, cas);
+            var newCas = await _dataManager.WriteAsync(grainType, grainIdString, grainState.State, cas);
 
             grainState.ETag = newCas.ToString();
             grainState.RecordExists = true;

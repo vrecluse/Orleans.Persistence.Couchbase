@@ -2,13 +2,8 @@ using FluentAssertions;
 using Microsoft.Extensions.Logging;
 using Moq;
 using Orleans.Persistence.Couchbase.Core;
-using Orleans.Persistence.Couchbase.Serialization;
 using Orleans.Runtime;
 using Orleans.Storage;
-using System;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using Xunit;
 
 namespace Orleans.Persistence.Couchbase.UnitTests;
@@ -17,21 +12,16 @@ public class CouchbaseGrainStorageTests
 {
     private readonly Mock<ICouchbaseDataManager> _mockDataManager;
     private readonly Mock<ILogger<CouchbaseGrainStorage>> _mockLogger;
-    private readonly Mock<IGrainStateSerializer> _mockSerializer;
     private readonly CouchbaseGrainStorage _storage;
 
     public CouchbaseGrainStorageTests()
     {
         _mockDataManager = new Mock<ICouchbaseDataManager>();
         _mockLogger = new Mock<ILogger<CouchbaseGrainStorage>>();
-        _mockSerializer = new Mock<IGrainStateSerializer>();
-
-        _mockSerializer.Setup(s => s.ContentType).Returns("application/json");
 
         _storage = new CouchbaseGrainStorage(
             "TestStorage",
             _mockDataManager.Object,
-            _mockSerializer.Object,
             _mockLogger.Object);
     }
 
@@ -41,17 +31,12 @@ public class CouchbaseGrainStorageTests
         // Arrange
         var grainId = GrainId.Create("test-grain", "key1");
         var grainState = new GrainState<TestState> { State = new TestState() };
-        var testData = Encoding.UTF8.GetBytes("{\"Value\":\"test\"}");
+        var expectedState = new TestState { Value = "test" };
         var testCas = 12345UL;
 
         _mockDataManager
-            .Setup(dm => dm.ReadAsync("TestState", grainId.ToString(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((testData.AsMemory(), testCas));
-
-        var expectedState = new TestState { Value = "deserialized" };
-        _mockSerializer
-            .Setup(s => s.Deserialize<TestState>(It.IsAny<ReadOnlyMemory<byte>>()))
-            .Returns(expectedState);
+            .Setup(dm => dm.ReadAsync<TestState>("TestState", grainId.ToString(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((expectedState, testCas));
 
         // Act
         await _storage.ReadStateAsync("TestState", grainId, grainState);
@@ -70,8 +55,8 @@ public class CouchbaseGrainStorageTests
         var grainState = new GrainState<TestState> { State = new TestState() };
 
         _mockDataManager
-            .Setup(dm => dm.ReadAsync("TestState", grainId.ToString(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((ReadOnlyMemory<byte>.Empty, 0UL));
+            .Setup(dm => dm.ReadAsync<TestState>("TestState", grainId.ToString(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(((TestState?)null, 0UL));
 
         // Act
         await _storage.ReadStateAsync("TestState", grainId, grainState);
@@ -82,7 +67,7 @@ public class CouchbaseGrainStorageTests
     }
 
     [Fact]
-    public async Task WriteStateAsync_ShouldSerializeAndWriteState()
+    public async Task WriteStateAsync_ShouldWriteState()
     {
         // Arrange
         var grainId = GrainId.Create("test-grain", "key1");
@@ -93,17 +78,12 @@ public class CouchbaseGrainStorageTests
             ETag = "123"
         };
 
-        var serializedData = Encoding.UTF8.GetBytes("{\"Value\":\"test-value\"}");
-        _mockSerializer
-            .Setup(s => s.Serialize(testState))
-            .Returns(serializedData);
-
         var newCas = 456UL;
         _mockDataManager
             .Setup(dm => dm.WriteAsync(
                 "TestState",
                 grainId.ToString(),
-                It.IsAny<ReadOnlyMemory<byte>>(),
+                testState,
                 123UL,
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(newCas);
@@ -119,7 +99,7 @@ public class CouchbaseGrainStorageTests
             dm => dm.WriteAsync(
                 "TestState",
                 grainId.ToString(),
-                It.IsAny<ReadOnlyMemory<byte>>(),
+                testState,
                 123UL,
                 It.IsAny<CancellationToken>()),
             Times.Once);
@@ -137,17 +117,12 @@ public class CouchbaseGrainStorageTests
             ETag = null
         };
 
-        var serializedData = Encoding.UTF8.GetBytes("{\"Value\":\"test-value\"}");
-        _mockSerializer
-            .Setup(s => s.Serialize(testState))
-            .Returns(serializedData);
-
         var newCas = 789UL;
         _mockDataManager
             .Setup(dm => dm.WriteAsync(
                 "TestState",
                 grainId.ToString(),
-                It.IsAny<ReadOnlyMemory<byte>>(),
+                testState,
                 0UL,
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(newCas);
@@ -162,7 +137,7 @@ public class CouchbaseGrainStorageTests
             dm => dm.WriteAsync(
                 "TestState",
                 grainId.ToString(),
-                It.IsAny<ReadOnlyMemory<byte>>(),
+                testState,
                 0UL,
                 It.IsAny<CancellationToken>()),
             Times.Once);

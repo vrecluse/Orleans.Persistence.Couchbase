@@ -1,46 +1,52 @@
 namespace Orleans.Persistence.Couchbase.Core;
 
 /// <summary>
-/// Couchbase 数据管理器接口
+/// Couchbase data manager interface for grain state persistence.
 /// </summary>
 public interface ICouchbaseDataManager : IAsyncDisposable
 {
     /// <summary>
-    /// 初始化连接
+    /// Initialize connection to Couchbase cluster.
     /// </summary>
     Task InitializeAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// 读取粮食状态
+    /// Read grain state from Couchbase.
     /// </summary>
-    /// <param name="grainType">粮食类型</param>
-    /// <param name="grainId">粮食ID</param>
-    /// <param name="cancellationToken">取消令牌</param>
-    /// <returns>数据和 CAS 值的元组，如果不存在则返回空数据</returns>
-    Task<(ReadOnlyMemory<byte> Data, ulong Cas)> ReadAsync(
+    /// <typeparam name="T">The grain state type.</typeparam>
+    /// <param name="grainType">The grain type name.</param>
+    /// <param name="grainId">The grain identifier.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Tuple of deserialized state (null if not found) and CAS value.</returns>
+    Task<(T? State, ulong Cas)> ReadAsync<T>(
         string grainType,
         string grainId,
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// 写入粮食状态
+    /// Write grain state to Couchbase.
     /// </summary>
-    /// <param name="grainType">粮食类型</param>
-    /// <param name="grainId">粮食ID</param>
-    /// <param name="data">序列化数据</param>
-    /// <param name="cas">CAS 值（0 表示新插入）</param>
-    /// <param name="cancellationToken">取消令牌</param>
-    /// <returns>新的 CAS 值</returns>
-    Task<ulong> WriteAsync(
+    /// <typeparam name="T">The grain state type.</typeparam>
+    /// <param name="grainType">The grain type name.</param>
+    /// <param name="grainId">The grain identifier.</param>
+    /// <param name="state">The grain state to persist.</param>
+    /// <param name="cas">CAS value for optimistic concurrency (0 for new documents).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>New CAS value after write.</returns>
+    Task<ulong> WriteAsync<T>(
         string grainType,
         string grainId,
-        ReadOnlyMemory<byte> data,
+        T state,
         ulong cas,
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// 删除粮食状态
+    /// Delete grain state from Couchbase.
     /// </summary>
+    /// <param name="grainType">The grain type name.</param>
+    /// <param name="grainId">The grain identifier.</param>
+    /// <param name="cas">CAS value for optimistic concurrency (0 to skip check).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     Task DeleteAsync(
         string grainType,
         string grainId,
@@ -48,7 +54,7 @@ public interface ICouchbaseDataManager : IAsyncDisposable
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// 桶名称
+    /// Gets the bucket name.
     /// </summary>
     string BucketName { get; }
 }

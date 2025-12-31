@@ -1,199 +1,184 @@
 using FluentAssertions;
 using MessagePack;
-using Orleans.Persistence.Couchbase.Serialization;
-using System;
-using System.Text;
-using System.Text.Json;
+using Orleans.Persistence.Couchbase.Infrastructure;
 using Xunit;
 
 namespace Orleans.Persistence.Couchbase.UnitTests;
 
-public class JsonGrainStateSerializerTests
+public class OrleansCouchbaseTranscoderTests
 {
-    private readonly JsonGrainStateSerializer _serializer = new();
+    private readonly OrleansCouchbaseTranscoder _transcoder = new();
 
     [Fact]
-    public void ContentType_ShouldReturnApplicationJson()
+    public void Encode_ShouldProduceBinaryWithHeader()
     {
-        _serializer.ContentType.Should().Contain("application/json");
+        // Arrange
+        var state = new MessagePackTestState { Name = "Test", Value = 42, IsActive = true };
+        using var stream = new MemoryStream();
+
+        // Act
+        _transcoder.Encode(stream, state, default, default);
+
+        // Assert
+        var data = stream.ToArray();
+        data.Length.Should().BeGreaterThan(4);
+
+        // Verify header
+        data[0].Should().Be(2); // Version
+        data[1].Should().Be(1); // Format (MessagePack)
+        data[2].Should().Be(0); // Reserved
+        data[3].Should().Be(0); // Reserved
     }
 
     [Fact]
-    public void Serialize_ShouldProduceValidJson()
+    public void Decode_ShouldRestoreState()
     {
         // Arrange
-        var state = new TestState { Name = "Test", Value = 42, IsActive = true };
+        var original = new MessagePackTestState { Name = "Test", Value = 42, IsActive = true };
+        using var stream = new MemoryStream();
+        _transcoder.Encode(stream, original, default, default);
+        var data = stream.ToArray();
 
         // Act
-        var data = _serializer.Serialize(state);
+        var restored = _transcoder.Decode<MessagePackTestState>(data, default, default);
 
         // Assert
-        data.Length.Should().BeGreaterThan(0);
-
-        // Verify it's valid JSON (System.Text.Json uses camelCase by default)
-        var json = Encoding.UTF8.GetString(data.Span);
-        var parsed = JsonDocument.Parse(json);
-        parsed.RootElement.GetProperty("name").GetString().Should().Be("Test");
-        parsed.RootElement.GetProperty("value").GetInt32().Should().Be(42);
-        parsed.RootElement.GetProperty("isActive").GetBoolean().Should().BeTrue();
-    }
-
-    [Fact]
-    public void Deserialize_ShouldRestoreState()
-    {
-        // Arrange
-        var original = new TestState { Name = "Test", Value = 42, IsActive = true };
-        var data = _serializer.Serialize(original);
-
-        // Act
-        var restored = _serializer.Deserialize<TestState>(data);
-
-        // Assert
-        restored.Name.Should().Be(original.Name);
+        restored.Should().NotBeNull();
+        restored!.Name.Should().Be(original.Name);
         restored.Value.Should().Be(original.Value);
         restored.IsActive.Should().Be(original.IsActive);
     }
 
     [Fact]
-    public void SerializeAndDeserialize_WithNullValues_ShouldWork()
+    public void Decode_WithEmptyBuffer_ShouldReturnDefault()
     {
-        // Arrange
-        var state = new TestStateWithNullable { Name = null, OptionalValue = null };
-
         // Act
-        var data = _serializer.Serialize(state);
-        var restored = _serializer.Deserialize<TestStateWithNullable>(data);
+        var result = _transcoder.Decode<MessagePackTestState>(ReadOnlyMemory<byte>.Empty, default, default);
 
         // Assert
-        restored.Name.Should().BeNull();
+        result.Should().BeNull();
+    }
+
+    [Fact]
+    public void Decode_WithInvalidHeader_ShouldThrow()
+    {
+        // Arrange - buffer too short
+        var shortBuffer = new byte[] { 0x02, 0x01 };
+
+        // Act & Assert
+        Assert.Throws<InvalidDataException>(() =>
+            _transcoder.Decode<MessagePackTestState>(shortBuffer, default, default));
+    }
+
+    [Fact]
+    public void Decode_WithUnsupportedVersion_ShouldThrow()
+    {
+        // Arrange - version 99 is not supported
+        var invalidVersionBuffer = new byte[] { 99, 1, 0, 0, 0x92, 0xa4 }; // Invalid version
+
+        // Act & Assert
+        var ex = Assert.Throws<InvalidDataException>(() =>
+            _transcoder.Decode<MessagePackTestState>(invalidVersionBuffer, default, default));
+
+        ex.Message.Should().Contain("Unsupported document version");
+    }
+
+    [Fact]
+    public void Decode_WithUnsupportedFormat_ShouldThrow()
+    {
+        // Arrange - format 99 is not supported
+        var invalidFormatBuffer = new byte[] { 2, 99, 0, 0, 0x92, 0xa4 }; // Invalid format
+
+        // Act & Assert
+        var ex = Assert.Throws<InvalidDataException>(() =>
+            _transcoder.Decode<MessagePackTestState>(invalidFormatBuffer, default, default));
+
+        ex.Message.Should().Contain("Unsupported serialization format");
+    }
+
+    [Fact]
+    public void RoundTrip_WithNullValues_ShouldWork()
+    {
+        // Arrange
+        var state = new MessagePackStateWithNullable { Name = null, OptionalValue = null };
+        using var stream = new MemoryStream();
+
+        // Act
+        _transcoder.Encode(stream, state, default, default);
+        var data = stream.ToArray();
+        var restored = _transcoder.Decode<MessagePackStateWithNullable>(data, default, default);
+
+        // Assert
+        restored.Should().NotBeNull();
+        restored!.Name.Should().BeNull();
         restored.OptionalValue.Should().BeNull();
     }
 
     [Fact]
-    public void SerializeAndDeserialize_WithComplexObject_ShouldWork()
+    public void RoundTrip_WithComplexObject_ShouldWork()
     {
         // Arrange
-        var state = new ComplexState
+        var state = new MessagePackComplexState
         {
-            Items = new[] { "a", "b", "c" },
-            Nested = new TestState { Name = "Nested", Value = 100, IsActive = false },
+            Items = ["a", "b", "c"],
+            Nested = new MessagePackTestState { Name = "Nested", Value = 100, IsActive = false },
             Timestamp = new DateTime(2024, 1, 15, 10, 30, 0, DateTimeKind.Utc)
         };
+        using var stream = new MemoryStream();
 
         // Act
-        var data = _serializer.Serialize(state);
-        var restored = _serializer.Deserialize<ComplexState>(data);
+        _transcoder.Encode(stream, state, default, default);
+        var data = stream.ToArray();
+        var restored = _transcoder.Decode<MessagePackComplexState>(data, default, default);
 
         // Assert
-        restored.Items.Should().BeEquivalentTo(state.Items);
+        restored.Should().NotBeNull();
+        restored!.Items.Should().BeEquivalentTo(state.Items);
         restored.Nested.Name.Should().Be("Nested");
         restored.Nested.Value.Should().Be(100);
         restored.Timestamp.Should().Be(state.Timestamp);
     }
-}
-
-public class MessagePackGrainStateSerializerTests
-{
-    private readonly MessagePackGrainStateSerializer _serializer = new();
 
     [Fact]
-    public void ContentType_ShouldReturnApplicationMsgpack()
-    {
-        _serializer.ContentType.Should().Be("application/x-msgpack");
-    }
-
-    [Fact]
-    public void Serialize_ShouldProduceBinaryData()
+    public void GetFormat_ShouldReturnBinaryFormat()
     {
         // Arrange
-        var state = new MessagePackTestState { Name = "Test", Value = 42, IsActive = true };
+        var state = new MessagePackTestState { Name = "Test", Value = 1, IsActive = true };
 
         // Act
-        var data = _serializer.Serialize(state);
+        var flags = _transcoder.GetFormat(state);
 
         // Assert
-        data.Length.Should().BeGreaterThan(0);
-
-        // Should NOT be valid UTF-8 text (it's binary)
-        // MessagePack format starts with specific bytes
-        data.Span[0].Should().NotBe((byte)'{'); // Not JSON
+        flags.DataFormat.Should().Be(Couchbase.Core.IO.Operations.DataFormat.Binary);
     }
 
     [Fact]
-    public void Deserialize_ShouldRestoreState()
+    public void Encode_WithLargeObject_ShouldExpandBuffer()
     {
-        // Arrange
-        var original = new MessagePackTestState { Name = "Test", Value = 42, IsActive = true };
-        var data = _serializer.Serialize(original);
-
-        // Act
-        var restored = _serializer.Deserialize<MessagePackTestState>(data);
-
-        // Assert
-        restored.Name.Should().Be(original.Name);
-        restored.Value.Should().Be(original.Value);
-        restored.IsActive.Should().Be(original.IsActive);
-    }
-
-    [Fact]
-    public void SerializeAndDeserialize_WithNullValues_ShouldWork()
-    {
-        // Arrange
-        var state = new MessagePackStateWithNullable { Name = null, OptionalValue = null };
-
-        // Act
-        var data = _serializer.Serialize(state);
-        var restored = _serializer.Deserialize<MessagePackStateWithNullable>(data);
-
-        // Assert
-        restored.Name.Should().BeNull();
-        restored.OptionalValue.Should().BeNull();
-    }
-
-    [Fact]
-    public void Serialize_ShouldBeSmallerThanJson()
-    {
-        // Arrange
-        var state = new MessagePackTestState { Name = "TestWithLongerName", Value = 123456, IsActive = true };
-
-        var jsonSerializer = new JsonGrainStateSerializer();
-        var jsonData = jsonSerializer.Serialize(new TestState
+        // Arrange - create object larger than default 1KB buffer
+        var largeState = new MessagePackTestState
         {
-            Name = "TestWithLongerName",
-            Value = 123456,
+            Name = new string('x', 2000), // 2KB string
+            Value = 123,
             IsActive = true
-        });
+        };
+        using var stream = new MemoryStream();
 
-        // Act
-        var msgpackData = _serializer.Serialize(state);
+        // Act - should not throw
+        _transcoder.Encode(stream, largeState, default, default);
 
-        // Assert - MessagePack should typically be more compact
-        msgpackData.Length.Should().BeLessThan(jsonData.Length);
+        // Assert
+        var data = stream.ToArray();
+        data.Length.Should().BeGreaterThan(2000);
+
+        // Verify it can be decoded
+        var restored = _transcoder.Decode<MessagePackTestState>(data, default, default);
+        restored.Should().NotBeNull();
+        restored!.Name.Should().Be(largeState.Name);
     }
 }
 
-// Test models for JSON serializer
-public class TestState
-{
-    public string Name { get; set; } = string.Empty;
-    public int Value { get; set; }
-    public bool IsActive { get; set; }
-}
-
-public class TestStateWithNullable
-{
-    public string? Name { get; set; }
-    public int? OptionalValue { get; set; }
-}
-
-public class ComplexState
-{
-    public string[] Items { get; set; } = Array.Empty<string>();
-    public TestState Nested { get; set; } = new();
-    public DateTime Timestamp { get; set; }
-}
-
-// Test models for MessagePack serializer (need MessagePackObject attribute)
+// Test models for MessagePack serializer
 [MessagePackObject]
 public class MessagePackTestState
 {
@@ -215,4 +200,17 @@ public class MessagePackStateWithNullable
 
     [Key(1)]
     public int? OptionalValue { get; set; }
+}
+
+[MessagePackObject]
+public class MessagePackComplexState
+{
+    [Key(0)]
+    public string[] Items { get; set; } = [];
+
+    [Key(1)]
+    public MessagePackTestState Nested { get; set; } = new();
+
+    [Key(2)]
+    public DateTime Timestamp { get; set; }
 }

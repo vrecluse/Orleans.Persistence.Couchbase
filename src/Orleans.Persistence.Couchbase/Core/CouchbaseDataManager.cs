@@ -1,25 +1,22 @@
 using Couchbase;
+using Couchbase.Core.IO.Transcoders;
 using Couchbase.KeyValue;
 using Microsoft.Extensions.Logging;
 using Orleans.Persistence.Couchbase.Configuration;
-using Orleans.Persistence.Couchbase.Models;
-using Orleans.Persistence.Couchbase.Serialization;
+using Orleans.Persistence.Couchbase.Infrastructure;
 using Orleans.Storage;
-using Polly;
-using Polly.Retry;
 
 namespace Orleans.Persistence.Couchbase.Core;
 
 /// <summary>
-/// Couchbase SDK 3.x 数据管理器实现
+/// High-performance Couchbase data manager using custom transcoder for zero-copy serialization.
 /// </summary>
 public sealed class CouchbaseDataManager : ICouchbaseDataManager
 {
     private readonly ICluster _cluster;
     private readonly CouchbaseStorageOptions _options;
     private readonly ILogger<CouchbaseDataManager> _logger;
-    private readonly IGrainStateSerializer _serializer;
-    private readonly AsyncRetryPolicy _retryPolicy;
+    private readonly ITypeTranscoder _transcoder;
     private ICouchbaseCollection? _collection;
 
     public string BucketName => _options.BucketName;
@@ -27,29 +24,13 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
     public CouchbaseDataManager(
         ICluster cluster,
         CouchbaseStorageOptions options,
-        IGrainStateSerializer serializer,
+        ITypeTranscoder transcoder,
         ILogger<CouchbaseDataManager> logger)
     {
         _cluster = cluster ?? throw new ArgumentNullException(nameof(cluster));
         _options = options ?? throw new ArgumentNullException(nameof(options));
-        _serializer = serializer ?? throw new ArgumentNullException(nameof(serializer));
+        _transcoder = transcoder ?? throw new ArgumentNullException(nameof(transcoder));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-
-        // 配置重试策略
-        _retryPolicy = Policy
-            .Handle<CouchbaseException>(IsTransient)
-            .WaitAndRetryAsync(
-                retryCount: _options.MaxRetries ?? 3,
-                sleepDurationProvider: retryAttempt =>
-                    TimeSpan.FromMilliseconds(Math.Pow(2, retryAttempt) * 100),
-                onRetry: (exception, timeSpan, retryCount, context) =>
-                {
-                    _logger.LogWarning(
-                        exception,
-                        "Retry {RetryCount} after {Delay}ms due to transient error",
-                        retryCount,
-                        timeSpan.TotalMilliseconds);
-                });
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -73,7 +54,7 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
         }
     }
 
-    public async Task<(ReadOnlyMemory<byte> Data, ulong Cas)> ReadAsync(
+    public async Task<(T? State, ulong Cas)> ReadAsync<T>(
         string grainType,
         string grainId,
         CancellationToken cancellationToken = default)
@@ -84,55 +65,48 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
 
         try
         {
-            var result = await _retryPolicy.ExecuteAsync(async () =>
-                await _collection!.GetAsync(key));
+            var result = await _collection!.GetAsync(key, options =>
+                options.Transcoder(_transcoder));
 
-            if (result.ContentAs<StorageDocument>() is { } doc)
-            {
-                var data = Convert.FromBase64String(doc.Data);
-                return (data, result.Cas);
-            }
-
-            return (ReadOnlyMemory<byte>.Empty, 0);
+            // Transcoder handles deserialization internally via ContentAs<T>
+            var state = result.ContentAs<T>();
+            return (state, result.Cas);
         }
         catch (global::Couchbase.Core.Exceptions.KeyValue.DocumentNotFoundException)
         {
-            return (ReadOnlyMemory<byte>.Empty, 0);
+            return (default, 0);
         }
     }
 
-    public async Task<ulong> WriteAsync(
+    public async Task<ulong> WriteAsync<T>(
         string grainType,
         string grainId,
-        ReadOnlyMemory<byte> data,
+        T state,
         ulong cas,
         CancellationToken cancellationToken = default)
     {
         EnsureInitialized();
 
         var key = BuildDocumentKey(grainType, grainId);
-        var doc = new StorageDocument
-        {
-            Data = Convert.ToBase64String(data.ToArray()),
-            ContentType = _serializer.ContentType,
-            Version = 2
-        };
 
         try
         {
             IMutationResult result;
+
             if (cas != 0)
             {
                 // Use ReplaceAsync with CAS for optimistic concurrency control
-                var replaceOptions = new ReplaceOptions().Cas(cas);
-                result = await _retryPolicy.ExecuteAsync(async () =>
-                    await _collection!.ReplaceAsync(key, doc, replaceOptions));
+                var replaceOptions = new ReplaceOptions()
+                    .Cas(cas)
+                    .Transcoder(_transcoder);
+                result = await _collection!.ReplaceAsync(key, state, replaceOptions);
             }
             else
             {
-                // Use UpsertAsync for new documents or when CAS is not required
-                result = await _retryPolicy.ExecuteAsync(async () =>
-                    await _collection!.UpsertAsync(key, doc));
+                // Use UpsertAsync for new documents
+                var upsertOptions = new UpsertOptions()
+                    .Transcoder(_transcoder);
+                result = await _collection!.UpsertAsync(key, state, upsertOptions);
             }
 
             return result.Cas;
@@ -161,18 +135,16 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
             if (cas != 0)
             {
                 var options = new RemoveOptions().Cas(cas);
-                await _retryPolicy.ExecuteAsync(async () =>
-                    await _collection!.RemoveAsync(key, options));
+                await _collection!.RemoveAsync(key, options);
             }
             else
             {
-                await _retryPolicy.ExecuteAsync(async () =>
-                    await _collection!.RemoveAsync(key));
+                await _collection!.RemoveAsync(key);
             }
         }
         catch (global::Couchbase.Core.Exceptions.KeyValue.DocumentNotFoundException)
         {
-            // 文档不存在视为删除成功
+            // Document doesn't exist - treat as successful deletion
         }
         catch (global::Couchbase.Core.Exceptions.CasMismatchException)
         {
@@ -183,16 +155,30 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
         }
     }
 
-    public async ValueTask DisposeAsync()
+    /// <summary>
+    /// DataManager does not own the ICluster lifecycle - managed by DI container.
+    /// </summary>
+    public ValueTask DisposeAsync()
     {
-        if (_cluster != null)
-        {
-            await _cluster.DisposeAsync();
-        }
+        // No-op: ICluster lifecycle is managed by DI container
+        return ValueTask.CompletedTask;
     }
 
+    /// <summary>
+    /// Builds document key using optimized string.Create for minimal allocations.
+    /// </summary>
     private static string BuildDocumentKey(string grainType, string grainId)
-        => $"{grainType}:{grainId}";
+    {
+        return string.Create(
+            grainType.Length + 1 + grainId.Length,
+            (grainType, grainId),
+            static (span, state) =>
+            {
+                state.grainType.AsSpan().CopyTo(span);
+                span[state.grainType.Length] = ':';
+                state.grainId.AsSpan().CopyTo(span[(state.grainType.Length + 1)..]);
+            });
+    }
 
     private void EnsureInitialized()
     {
@@ -201,12 +187,5 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
             throw new InvalidOperationException(
                 "CouchbaseDataManager not initialized. Call InitializeAsync first.");
         }
-    }
-
-    private static bool IsTransient(CouchbaseException ex)
-    {
-        return ex is global::Couchbase.Core.Exceptions.TemporaryFailureException
-            or global::Couchbase.Core.Exceptions.TimeoutException
-            or global::Couchbase.Core.Exceptions.RequestCanceledException;
     }
 }

@@ -1,33 +1,35 @@
 using Couchbase;
+using Couchbase.Core.IO.Transcoders;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Orleans.Persistence.Couchbase.Configuration;
 using Orleans.Persistence.Couchbase.Core;
-using Orleans.Persistence.Couchbase.Serialization;
+using Orleans.Persistence.Couchbase.Infrastructure;
 using Orleans.Storage;
 
 namespace Orleans.Persistence.Couchbase.Hosting;
 
 /// <summary>
-/// Couchbase 存储的 IServiceCollection 扩展方法
+/// IServiceCollection extension methods for Couchbase grain storage.
 /// </summary>
 public static class CouchbaseServiceCollectionExtensions
 {
     /// <summary>
-    /// 添加 Couchbase Grain Storage（使用配置委托）
+    /// Adds Couchbase grain storage with configuration delegate.
     /// </summary>
     public static IServiceCollection AddCouchbaseGrainStorage(
         this IServiceCollection services,
         string name,
         Action<CouchbaseStorageOptions> configure)
     {
-        if (services == null) throw new ArgumentNullException(nameof(services));
-        if (name == null) throw new ArgumentNullException(nameof(name));
-        if (configure == null) throw new ArgumentNullException(nameof(configure));
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(name);
+        ArgumentNullException.ThrowIfNull(configure);
 
-        // 配置选项
+        // Configure options
         services.AddOptions<CouchbaseStorageOptions>(name)
             .Configure(configure)
             .ValidateDataAnnotations()
@@ -39,18 +41,18 @@ public static class CouchbaseServiceCollectionExtensions
     }
 
     /// <summary>
-    /// 添加 Couchbase Grain Storage（从 IConfiguration 绑定）
+    /// Adds Couchbase grain storage from IConfiguration binding.
     /// </summary>
     public static IServiceCollection AddCouchbaseGrainStorage(
         this IServiceCollection services,
         string name,
         IConfiguration configuration)
     {
-        if (services == null) throw new ArgumentNullException(nameof(services));
-        if (name == null) throw new ArgumentNullException(nameof(name));
-        if (configuration == null) throw new ArgumentNullException(nameof(configuration));
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(name);
+        ArgumentNullException.ThrowIfNull(configuration);
 
-        // 绑定配置
+        // Bind configuration
         services.AddOptions<CouchbaseStorageOptions>(name)
             .Bind(configuration)
             .ValidateDataAnnotations()
@@ -63,7 +65,8 @@ public static class CouchbaseServiceCollectionExtensions
 
     private static void RegisterCouchbaseServices(IServiceCollection services, string name)
     {
-        // 注册 Couchbase 集群（如果尚未注册）
+        // Register ICluster as singleton (if not already registered)
+        // Note: ICluster lifecycle is managed by DI container
         if (!services.Any(d => d.ServiceType == typeof(ICluster)))
         {
             services.AddSingleton<ICluster>(sp =>
@@ -82,43 +85,36 @@ public static class CouchbaseServiceCollectionExtensions
                     clusterOptions.Password = options.Password;
                 }
 
+                if (options.OperationTimeout.HasValue)
+                {
+                    clusterOptions.KvTimeout = options.OperationTimeout.Value;
+                }
+
                 return Cluster.ConnectAsync(clusterOptions).GetAwaiter().GetResult();
             });
         }
 
-        // 注册序列化器
-        services.AddKeyedSingleton<IGrainStateSerializer>(name, (sp, key) =>
-        {
-            var options = sp.GetRequiredService<IOptionsMonitor<CouchbaseStorageOptions>>()
-                .Get(name);
+        // Register high-performance transcoder
+        services.TryAddSingleton<ITypeTranscoder, OrleansCouchbaseTranscoder>();
 
-            return options.Serializer switch
-            {
-                SerializerType.Json => new JsonGrainStateSerializer(),
-                SerializerType.MessagePack => new MessagePackGrainStateSerializer(),
-                _ => throw new NotSupportedException($"Serializer {options.Serializer} not supported")
-            };
-        });
-
-        // 注册数据管理器
+        // Register data manager
         services.AddKeyedSingleton<ICouchbaseDataManager>(name, (sp, key) =>
         {
             var cluster = sp.GetRequiredService<ICluster>();
             var options = sp.GetRequiredService<IOptionsMonitor<CouchbaseStorageOptions>>().Get(name);
-            var serializer = sp.GetRequiredKeyedService<IGrainStateSerializer>(key);
+            var transcoder = sp.GetRequiredService<ITypeTranscoder>();
             var logger = sp.GetRequiredService<ILogger<CouchbaseDataManager>>();
 
-            return new CouchbaseDataManager(cluster, options, serializer, logger);
+            return new CouchbaseDataManager(cluster, options, transcoder, logger);
         });
 
-        // 注册 GrainStorage
+        // Register grain storage
         services.AddKeyedSingleton<IGrainStorage>(name, (sp, key) =>
         {
             var dataManager = sp.GetRequiredKeyedService<ICouchbaseDataManager>(key);
-            var serializer = sp.GetRequiredKeyedService<IGrainStateSerializer>(key);
             var logger = sp.GetRequiredService<ILogger<CouchbaseGrainStorage>>();
 
-            return new CouchbaseGrainStorage(name, dataManager, serializer, logger);
+            return new CouchbaseGrainStorage(name, dataManager, logger);
         });
     }
 }

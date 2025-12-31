@@ -3,64 +3,54 @@ using System.ComponentModel.DataAnnotations;
 namespace Orleans.Persistence.Couchbase.Configuration;
 
 /// <summary>
-/// Couchbase 存储配置选项
+/// Configuration options for Couchbase grain storage.
 /// </summary>
 public sealed class CouchbaseStorageOptions
 {
     /// <summary>
-    /// Couchbase 连接字符串（如 couchbase://localhost）
+    /// Couchbase connection string (e.g., couchbase://localhost).
     /// </summary>
     [Required]
     public string ConnectionString { get; set; } = string.Empty;
 
     /// <summary>
-    /// 桶名称
+    /// Bucket name for grain state storage.
     /// </summary>
     [Required]
     public string BucketName { get; set; } = string.Empty;
 
     /// <summary>
-    /// 作用域名称（默认 _default）
+    /// Scope name (default: _default).
     /// </summary>
     public string? ScopeName { get; set; }
 
     /// <summary>
-    /// 集合名称（默认 _default）
+    /// Collection name (default: _default).
     /// </summary>
     public string? CollectionName { get; set; }
 
     /// <summary>
-    /// 用户名
+    /// Couchbase username for authentication.
     /// </summary>
     public string? Username { get; set; }
 
     /// <summary>
-    /// 密码
+    /// Couchbase password for authentication.
     /// </summary>
     public string? Password { get; set; }
 
     /// <summary>
-    /// 序列化器类型
-    /// </summary>
-    public SerializerType Serializer { get; set; } = SerializerType.Json;
-
-    /// <summary>
-    /// 最大重试次数
-    /// </summary>
-    public int? MaxRetries { get; set; } = 3;
-
-    /// <summary>
-    /// 操作超时时间
+    /// Operation timeout. If not set, uses Couchbase SDK defaults.
     /// </summary>
     public TimeSpan? OperationTimeout { get; set; }
 
     /// <summary>
-    /// 启用追踪
+    /// Enable OpenTelemetry tracing.
     /// </summary>
     public bool EnableTracing { get; set; } = false;
 
     /// <summary>
-    /// 启用健康检查
+    /// Enable health check endpoint.
     /// </summary>
     public bool EnableHealthCheck { get; set; } = true;
 }
