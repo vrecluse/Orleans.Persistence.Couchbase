@@ -1,40 +1,54 @@
-﻿using System.Threading.Tasks;
-using Orleans.Persistence.Couchbase.Models;
+namespace Orleans.Persistence.Couchbase.Core;
 
-namespace Orleans.Persistence.Couchbase.Core
+/// <summary>
+/// Couchbase 数据管理器接口
+/// </summary>
+public interface ICouchbaseDataManager : IAsyncDisposable
 {
-    public interface ICouchbaseDataManager
-    {
-        string BucketName { get; }
+    /// <summary>
+    /// 初始化连接
+    /// </summary>
+    Task InitializeAsync(CancellationToken cancellationToken = default);
 
-        /// <summary>
-        /// Validates and applies storage provider configuration
-        /// </summary>
-        Task Initialise();
+    /// <summary>
+    /// 读取粮食状态
+    /// </summary>
+    /// <param name="grainType">粮食类型</param>
+    /// <param name="grainId">粮食ID</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>数据和 CAS 值的元组，如果不存在则返回空数据</returns>
+    Task<(ReadOnlyMemory<byte> Data, ulong Cas)> ReadAsync(
+        string grainType,
+        string grainId,
+        CancellationToken cancellationToken = default);
 
-        /// <summary>
-        /// Deletes a document representing a grain state object.
-        /// </summary>
-        /// <param name="grainTypeName">The type of the grain state object.</param>
-        /// <param name="key">The grain id string.</param>
-        Task DeleteAsync(string grainTypeName, string key, string eTag);
+    /// <summary>
+    /// 写入粮食状态
+    /// </summary>
+    /// <param name="grainType">粮食类型</param>
+    /// <param name="grainId">粮食ID</param>
+    /// <param name="data">序列化数据</param>
+    /// <param name="cas">CAS 值（0 表示新插入）</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>新的 CAS 值</returns>
+    Task<ulong> WriteAsync(
+        string grainType,
+        string grainId,
+        ReadOnlyMemory<byte> data,
+        ulong cas,
+        CancellationToken cancellationToken = default);
 
-        /// <summary>
-        /// Reads a document representing a grain state object.
-        /// </summary>
-        /// <param name="grainTypeName">The type of the grain state object.</param>
-        /// <param name="key">The grain id string.</param>
-        Task<ReadResponse> ReadAsync(string grainTypeName, string key);
+    /// <summary>
+    /// 删除粮食状态
+    /// </summary>
+    Task DeleteAsync(
+        string grainType,
+        string grainId,
+        ulong cas,
+        CancellationToken cancellationToken = default);
 
-        /// <summary>
-        /// Writes a document representing a grain state object.
-        /// </summary>
-        /// <param name="grainTypeName">The type of the grain state object.</param>
-        /// <param name="key">The grain id string.</param>
-        /// <param name="entityData">The grain state data to be stored.</param>
-        /// <param name="eTag"></param>
-        Task<string> WriteAsync(string grainTypeName, string key, string entityData, string eTag);
-
-        void Dispose();
-    }
+    /// <summary>
+    /// 桶名称
+    /// </summary>
+    string BucketName { get; }
 }
