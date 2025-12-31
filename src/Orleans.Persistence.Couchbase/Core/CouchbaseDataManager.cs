@@ -1,152 +1,203 @@
-﻿using System;
-using System.Linq;
-using System.Threading.Tasks;
 using Couchbase;
-using Couchbase.Configuration.Client;
-using Couchbase.Core;
-using Couchbase.IO;
+using Couchbase.KeyValue;
+using Microsoft.Extensions.Logging;
+using Orleans.Persistence.Couchbase.Configuration;
 using Orleans.Persistence.Couchbase.Exceptions;
 using Orleans.Persistence.Couchbase.Models;
 using Orleans.Storage;
 using Polly;
-using Polly.Timeout;
+using Polly.Retry;
 
-namespace Orleans.Persistence.Couchbase.Core
+namespace Orleans.Persistence.Couchbase.Core;
+
+/// <summary>
+/// Couchbase SDK 3.x 数据管理器实现
+/// </summary>
+public sealed class CouchbaseDataManager : ICouchbaseDataManager
 {
-    public class CouchbaseDataManager : IDisposable, ICouchbaseDataManager
+    private readonly ICluster _cluster;
+    private readonly CouchbaseStorageOptions _options;
+    private readonly ILogger<CouchbaseDataManager> _logger;
+    private readonly IGrainStateSerializer _serializer;
+    private readonly AsyncRetryPolicy _retryPolicy;
+    private ICouchbaseCollection? _collection;
+
+    public string BucketName => _options.BucketName;
+
+    public CouchbaseDataManager(
+        ICluster cluster,
+        CouchbaseStorageOptions options,
+        IGrainStateSerializer serializer,
+        ILogger<CouchbaseDataManager> logger)
     {
-        private IBucket bucket;
+        _cluster = cluster ?? throw new ArgumentNullException(nameof(cluster));
+        _options = options ?? throw new ArgumentNullException(nameof(options));
+        _serializer = serializer ?? throw new ArgumentNullException(nameof(serializer));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
-        public string BucketName { get; }
+        // 配置重试策略
+        _retryPolicy = Policy
+            .Handle<Couchbase.Core.Exceptions.CouchbaseException>(IsTransient)
+            .WaitAndRetryAsync(
+                retryCount: _options.MaxRetries ?? 3,
+                sleepDurationProvider: retryAttempt =>
+                    TimeSpan.FromMilliseconds(Math.Pow(2, retryAttempt) * 100),
+                onRetry: (exception, timeSpan, retryCount, context) =>
+                {
+                    _logger.LogWarning(
+                        exception,
+                        "Retry {RetryCount} after {Delay}ms due to transient error",
+                        retryCount,
+                        timeSpan.TotalMilliseconds);
+                });
+    }
 
-        private ClientConfiguration ClientConfig { get; }
-
-        public CouchbaseDataManager(string bucketName, ClientConfiguration clientConfig)
+    public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    {
+        try
         {
-            this.BucketName = bucketName;
-            this.ClientConfig = clientConfig;
-        }
+            var bucket = await _cluster.BucketAsync(_options.BucketName);
+            var scope = bucket.Scope(_options.ScopeName ?? "_default");
+            _collection = scope.Collection(_options.CollectionName ?? "_default");
 
-        public async Task Initialise()
+            _logger.LogInformation(
+                "Initialized Couchbase storage: Bucket={Bucket}, Scope={Scope}, Collection={Collection}",
+                _options.BucketName,
+                _options.ScopeName ?? "_default",
+                _options.CollectionName ?? "_default");
+        }
+        catch (Exception ex)
         {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(this.BucketName))
-                {
-                    throw new ArgumentException("BucketName can not be null or empty");
-                }
-
-                if (this.ClientConfig == null)
-                {
-                    throw new ArgumentException("You must supply a configuration to connect to Couchbase");
-                }
-
-                if (this.ClientConfig.BucketConfigs.All(a => a.Key != this.BucketName))
-                {
-                    throw new BucketConfigMissingFromConfigurationException($"The requested bucket is named '{this.BucketName}' however the provided Couchbase configuration has no bucket configuration");
-                }
-
-                if (!ClusterHelper.Initialized)
-                {
-                    ClusterHelper.Initialize(this.ClientConfig);
-                }
-                else
-                {
-                    foreach (var conf in this.ClientConfig.BucketConfigs)
-                    {
-                        if (ClusterHelper.Get().Configuration.BucketConfigs.ContainsKey(conf.Key))
-                        {
-                            ClusterHelper.Get().Configuration.BucketConfigs.Remove(conf.Key);
-                        }
-
-                        ClusterHelper.Get().Configuration.BucketConfigs.Add(conf.Key, conf.Value);
-                    }
-                }
-
-                var timeoutPolicy = Policy.TimeoutAsync(30, TimeoutStrategy.Pessimistic);
-                this.bucket = await timeoutPolicy.ExecuteAsync(async () => this.bucket = await ClusterHelper.GetBucketAsync(this.BucketName));
-            }
-            catch (Exception e)
-            {
-                await Task.FromException(e);
-            }
+            _logger.LogError(ex, "Failed to initialize Couchbase connection");
+            throw;
         }
+    }
 
-        /// <inheritdoc />
-        public async Task DeleteAsync(string grainTypeName, string key, string eTag)
+    public async Task<(ReadOnlyMemory<byte> Data, ulong Cas)> ReadAsync(
+        string grainType,
+        string grainId,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureInitialized();
+
+        var key = BuildDocumentKey(grainType, grainId);
+
+        try
         {
-            var documentId = GetDocumentId(grainTypeName, key);
-            var result = await bucket.RemoveAsync(documentId, ulong.Parse(eTag));
-            if (!result.Success)
-            {
-                throw new InconsistentStateException(result.Message, eTag, result.Cas.ToString());
-            }
-        }
+            var result = await _retryPolicy.ExecuteAsync(async () =>
+                await _collection!.GetAsync(key, cancellationToken: cancellationToken));
 
-        /// <inheritdoc />
-        public async Task<ReadResponse> ReadAsync(string grainTypeName, string key)
+            if (result.ContentAs<StorageDocument>() is { } doc)
+            {
+                var data = Convert.FromBase64String(doc.Data);
+                return (data, result.Cas);
+            }
+
+            return (ReadOnlyMemory<byte>.Empty, 0);
+        }
+        catch (Couchbase.Core.Exceptions.DocumentNotFoundException)
         {
-            var documentId = GetDocumentId(grainTypeName, key);
-
-            var result = await bucket.GetAsync<string>(documentId);
-            if (result.Success)
-            {
-                return new ReadResponse { Document = result.Value, ETag = result.Cas.ToString() };
-            }
-
-            if (!result.Success && result.Status == ResponseStatus.KeyNotFound)
-            {
-                return new ReadResponse { Document = null, ETag = string.Empty };
-            }
-
-            throw result.Exception;
+            return (ReadOnlyMemory<byte>.Empty, 0);
         }
+    }
 
-        /// <inheritdoc />
-        public async Task<string> WriteAsync(string grainTypeName, string key, string entityData, string eTag)
+    public async Task<ulong> WriteAsync(
+        string grainType,
+        string grainId,
+        ReadOnlyMemory<byte> data,
+        ulong cas,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureInitialized();
+
+        var key = BuildDocumentKey(grainType, grainId);
+        var doc = new StorageDocument
         {
-            var documentId = GetDocumentId(grainTypeName, key);
+            Data = Convert.ToBase64String(data.ToArray()),
+            ContentType = _serializer.ContentType,
+            Version = 2
+        };
 
-            string result;
-
-            if (ulong.TryParse(eTag, out var realETag))
-            {
-                var r = await bucket.UpsertAsync(documentId, entityData, realETag, TimeSpan.Zero);
-                if (!r.Success)
-                {
-                    throw new InconsistentStateException(r.Status.ToString(), eTag, r.Cas.ToString());
-                }
-
-                result = r.Cas.ToString();
-            }
-            else
-            {
-                var r = await bucket.InsertAsync(documentId, entityData, TimeSpan.Zero);
-
-                if (!r.Success && r.Status == ResponseStatus.KeyExists)
-                {
-                    throw new InconsistentStateException(r.Status.ToString(), eTag, r.Cas.ToString());
-                }
-
-                if (!r.Success)
-                {
-                    throw new Exception(r.Status.ToString());
-                }
-
-                result = r.Cas.ToString();
-            }
-
-            return result;
-        }
-
-        public void Dispose()
+        try
         {
-            bucket.Dispose();
-            bucket = null;
-            ClusterHelper.Close();
-            GC.SuppressFinalize(this);
+            var options = new UpsertOptions();
+            if (cas != 0)
+            {
+                options.Cas(cas);
+            }
+
+            var result = await _retryPolicy.ExecuteAsync(async () =>
+                await _collection!.UpsertAsync(key, doc, options, cancellationToken));
+
+            return result.Cas;
         }
-        
-        private static string GetDocumentId(string grainTypeName, string key) => $"{grainTypeName}_{key}";
+        catch (Couchbase.Core.Exceptions.CasMismatchException ex)
+        {
+            throw new InconsistentStateException(
+                "ETag mismatch - concurrent modification detected",
+                cas.ToString(),
+                ex.Context?.Cas.ToString() ?? "unknown");
+        }
+    }
+
+    public async Task DeleteAsync(
+        string grainType,
+        string grainId,
+        ulong cas,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureInitialized();
+
+        var key = BuildDocumentKey(grainType, grainId);
+
+        try
+        {
+            var options = new RemoveOptions();
+            if (cas != 0)
+            {
+                options.Cas(cas);
+            }
+
+            await _retryPolicy.ExecuteAsync(async () =>
+                await _collection!.RemoveAsync(key, options, cancellationToken));
+        }
+        catch (Couchbase.Core.Exceptions.DocumentNotFoundException)
+        {
+            // 文档不存在视为删除成功
+        }
+        catch (Couchbase.Core.Exceptions.CasMismatchException ex)
+        {
+            throw new InconsistentStateException(
+                "ETag mismatch during delete",
+                cas.ToString(),
+                ex.Context?.Cas.ToString() ?? "unknown");
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_cluster != null)
+        {
+            await _cluster.DisposeAsync();
+        }
+    }
+
+    private static string BuildDocumentKey(string grainType, string grainId)
+        => $"{grainType}:{grainId}";
+
+    private void EnsureInitialized()
+    {
+        if (_collection == null)
+        {
+            throw new InvalidOperationException(
+                "CouchbaseDataManager not initialized. Call InitializeAsync first.");
+        }
+    }
+
+    private static bool IsTransient(Couchbase.Core.Exceptions.CouchbaseException ex)
+    {
+        return ex is Couchbase.Core.Exceptions.TemporaryFailureException
+            or Couchbase.Core.Exceptions.TimeoutException
+            or Couchbase.Core.Exceptions.RequestCanceledException;
     }
 }
