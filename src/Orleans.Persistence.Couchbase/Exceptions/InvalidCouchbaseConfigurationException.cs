@@ -1,25 +1,20 @@
-﻿using System;
-using System.Runtime.Serialization;
+namespace Orleans.Persistence.Couchbase.Exceptions;
 
-namespace Orleans.Persistence.Couchbase.Exceptions
+/// <summary>
+/// 无效的 Couchbase 配置异常
+/// </summary>
+public class InvalidCouchbaseConfigurationException : CouchbasePersistenceException
 {
-    [Serializable]
-    public class InvalidCouchbaseConfigurationException : Exception
+    public InvalidCouchbaseConfigurationException()
     {
-        public InvalidCouchbaseConfigurationException()
-        {
-        }
+    }
 
-        public InvalidCouchbaseConfigurationException(string message) : base(message)
-        {
-        }
+    public InvalidCouchbaseConfigurationException(string message) : base(message)
+    {
+    }
 
-        public InvalidCouchbaseConfigurationException(string message, Exception innerException) : base(message, innerException)
-        {
-        }
-
-        protected InvalidCouchbaseConfigurationException(SerializationInfo info, StreamingContext context) : base(info, context)
-        {
-        }
+    public InvalidCouchbaseConfigurationException(string message, Exception innerException)
+        : base(message, innerException)
+    {
     }
 }

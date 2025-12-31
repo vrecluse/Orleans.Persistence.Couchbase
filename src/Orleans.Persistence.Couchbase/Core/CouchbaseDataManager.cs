@@ -37,7 +37,7 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
 
         // 配置重试策略
         _retryPolicy = Policy
-            .Handle<Couchbase.Core.Exceptions.CouchbaseException>(IsTransient)
+            .Handle<CouchbaseException>(IsTransient)
             .WaitAndRetryAsync(
                 retryCount: _options.MaxRetries ?? 3,
                 sleepDurationProvider: retryAttempt =>
@@ -85,7 +85,7 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
         try
         {
             var result = await _retryPolicy.ExecuteAsync(async () =>
-                await _collection!.GetAsync(key, cancellationToken: cancellationToken));
+                await _collection!.GetAsync(key));
 
             if (result.ContentAs<StorageDocument>() is { } doc)
             {
@@ -95,7 +95,7 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
 
             return (ReadOnlyMemory<byte>.Empty, 0);
         }
-        catch (Couchbase.Core.Exceptions.DocumentNotFoundException)
+        catch (global::Couchbase.Core.Exceptions.KeyValue.DocumentNotFoundException)
         {
             return (ReadOnlyMemory<byte>.Empty, 0);
         }
@@ -120,23 +120,29 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
 
         try
         {
-            var options = new UpsertOptions();
+            IMutationResult result;
             if (cas != 0)
             {
-                options.Cas(cas);
+                // Use ReplaceAsync with CAS for optimistic concurrency control
+                var replaceOptions = new ReplaceOptions().Cas(cas);
+                result = await _retryPolicy.ExecuteAsync(async () =>
+                    await _collection!.ReplaceAsync(key, doc, replaceOptions));
             }
-
-            var result = await _retryPolicy.ExecuteAsync(async () =>
-                await _collection!.UpsertAsync(key, doc, options, cancellationToken));
+            else
+            {
+                // Use UpsertAsync for new documents or when CAS is not required
+                result = await _retryPolicy.ExecuteAsync(async () =>
+                    await _collection!.UpsertAsync(key, doc));
+            }
 
             return result.Cas;
         }
-        catch (Couchbase.Core.Exceptions.CasMismatchException ex)
+        catch (global::Couchbase.Core.Exceptions.CasMismatchException)
         {
             throw new InconsistentStateException(
                 "ETag mismatch - concurrent modification detected",
                 cas.ToString(),
-                ex.Context?.Cas.ToString() ?? "unknown");
+                "unknown");
         }
     }
 
@@ -152,25 +158,28 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
 
         try
         {
-            var options = new RemoveOptions();
             if (cas != 0)
             {
-                options.Cas(cas);
+                var options = new RemoveOptions().Cas(cas);
+                await _retryPolicy.ExecuteAsync(async () =>
+                    await _collection!.RemoveAsync(key, options));
             }
-
-            await _retryPolicy.ExecuteAsync(async () =>
-                await _collection!.RemoveAsync(key, options, cancellationToken));
+            else
+            {
+                await _retryPolicy.ExecuteAsync(async () =>
+                    await _collection!.RemoveAsync(key));
+            }
         }
-        catch (Couchbase.Core.Exceptions.DocumentNotFoundException)
+        catch (global::Couchbase.Core.Exceptions.KeyValue.DocumentNotFoundException)
         {
             // 文档不存在视为删除成功
         }
-        catch (Couchbase.Core.Exceptions.CasMismatchException ex)
+        catch (global::Couchbase.Core.Exceptions.CasMismatchException)
         {
             throw new InconsistentStateException(
                 "ETag mismatch during delete",
                 cas.ToString(),
-                ex.Context?.Cas.ToString() ?? "unknown");
+                "unknown");
         }
     }
 
@@ -194,10 +203,10 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
         }
     }
 
-    private static bool IsTransient(Couchbase.Core.Exceptions.CouchbaseException ex)
+    private static bool IsTransient(CouchbaseException ex)
     {
-        return ex is Couchbase.Core.Exceptions.TemporaryFailureException
-            or Couchbase.Core.Exceptions.TimeoutException
-            or Couchbase.Core.Exceptions.RequestCanceledException;
+        return ex is global::Couchbase.Core.Exceptions.TemporaryFailureException
+            or global::Couchbase.Core.Exceptions.TimeoutException
+            or global::Couchbase.Core.Exceptions.RequestCanceledException;
     }
 }

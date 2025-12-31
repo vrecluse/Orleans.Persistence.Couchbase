@@ -22,19 +22,46 @@ public sealed class CouchbaseHealthCheck : IHealthCheck
     {
         try
         {
-            var diagnostics = await _cluster.DiagnosticsAsync();
-
-            var isHealthy = diagnostics.State == DiagnosticsState.Ok;
+            // Use PingAsync for active health check
+            var pingResult = await _cluster.PingAsync();
 
             var data = new Dictionary<string, object>
             {
-                ["State"] = diagnostics.State.ToString(),
-                ["Id"] = diagnostics.Id
+                ["Id"] = pingResult.Id,
+                ["Version"] = pingResult.Version.ToString()
             };
 
-            return isHealthy
-                ? HealthCheckResult.Healthy("Couchbase cluster is healthy", data)
-                : HealthCheckResult.Degraded($"Couchbase cluster state: {diagnostics.State}", null, data);
+            // Check service states from the ping result
+            var hasHealthyServices = false;
+            var hasDegradedServices = false;
+
+            foreach (var serviceEntry in pingResult.Services)
+            {
+                foreach (var endpoint in serviceEntry.Value)
+                {
+                    if (endpoint.State == ServiceState.Ok)
+                    {
+                        hasHealthyServices = true;
+                    }
+                    else
+                    {
+                        hasDegradedServices = true;
+                    }
+                }
+            }
+
+            if (hasHealthyServices && !hasDegradedServices)
+            {
+                return HealthCheckResult.Healthy("Couchbase cluster is healthy", data);
+            }
+            else if (hasHealthyServices)
+            {
+                return HealthCheckResult.Degraded("Couchbase cluster has degraded services", null, data);
+            }
+            else
+            {
+                return HealthCheckResult.Unhealthy("Couchbase cluster has no healthy services", null, data);
+            }
         }
         catch (Exception ex)
         {
