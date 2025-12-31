@@ -1,36 +1,31 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
-   
+<Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
-    <TargetFramework>netstandard2.0</TargetFramework>
-    <Deterministic>false</Deterministic>
-    <AssemblyVersion>1.1.*</AssemblyVersion>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
     <PackageId>Orleans.Persistence.Couchbase</PackageId>
-    <Version>1.0.0</Version>
+    <Version>2.0.0</Version>
     <Authors>Mark</Authors>
     <Company>MRD</Company>
     <Product>Orleans.Persistence.Couchbase</Product>
-    <Description>Allows storing of Microsoft Orleans grain state in Couchbase</Description>
+    <Description>Allows storing of Microsoft Orleans grain state in Couchbase with MessagePack support</Description>
     <RepositoryUrl>https://github.com/mrd1234/Orleans.Persistence.Couchbase</RepositoryUrl>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-    <PackageTags>Orleans Couchbase Storage Persistence StorageProvider</PackageTags>
+    <PackageTags>Orleans Couchbase Storage Persistence StorageProvider MessagePack Aspire</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Remove="Old\**" />
-    <EmbeddedResource Remove="Old\**" />
-    <None Remove="Old\**" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Compile Remove="Config\StorageConstants.cs" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="CouchbaseNetClient" Version="2.7.12" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="3.0.0" />
-    <PackageReference Include="Microsoft.Orleans.OrleansProviders" Version="3.0.0" />
-    <PackageReference Include="Polly" Version="7.1.1" />
-    <PackageReference Include="System.Configuration.ConfigurationManager" Version="4.6.0" />
+    <PackageReference Include="CouchbaseNetClient" Version="3.8.1" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Options.DataAnnotations" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Orleans.Core" Version="9.2.1" />
+    <PackageReference Include="Microsoft.Orleans.Runtime" Version="9.2.1" />
+    <PackageReference Include="MessagePack" Version="3.1.4" />
+    <PackageReference Include="MessagePack.Annotations" Version="3.1.4" />
+    <PackageReference Include="Polly" Version="8.5.0" />
     <PackageReference Include="System.Data.HashFunction.xxHash" Version="2.0.0" />
   </ItemGroup>
 
