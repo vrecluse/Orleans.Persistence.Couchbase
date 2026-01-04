@@ -122,12 +122,17 @@ public sealed class CouchbaseDataManager : ICouchbaseDataManager
         serializer.Serialize(writer, state);
 
         // Convert to array for Couchbase SDK (final allocation point)
-        var dataToSend = writer.WrittenMemory.ToArray();
+        var dataToSend = writer.WrittenMemory;
 
         try
         {
             IMutationResult result;
-            var rawTranscoder = new RawBinaryTranscoder();
+            // Use appropriate DataFormat flags for Couchbase console visualization
+            // JSON format uses DataFormat.Json for proper display in Couchbase Web Console/N1QL
+            var couchbaseDataFormat = format == CouchbaseDataFormat.Json
+                ? global::Couchbase.Core.IO.Operations.DataFormat.Json
+                : global::Couchbase.Core.IO.Operations.DataFormat.Binary;
+            var rawTranscoder = new RawBinaryTranscoder(couchbaseDataFormat);
 
             if (cas != 0)
             {
